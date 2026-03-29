@@ -203,4 +203,4 @@ For production deployment:
 
 ## License
 
-Choose a license and add a LICENSE file (for example MIT).
+This project is licensed under the MIT License. See the LICENSE file for details.
