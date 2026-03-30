@@ -302,7 +302,7 @@ Streamlit UI (displays answer + sources)
 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/your-repo-name.git
+git clone https://github.com/Maneeshaherath/pdf_rag_assitant
 cd your-repo-name
 ```
 
