@@ -30,14 +30,241 @@ It combines:
 - Works with local persistent indexing across restarts
 - Provides both API and UI for flexible usage
 
-## Architecture
+## System Architecture
 
-- Frontend: Streamlit chat interface
-- Backend: FastAPI
-- Vector Store: Chroma (persistent on disk)
-- LLM: OpenAI chat model
-- Embeddings: text-embedding-3-small
-- Reranker: cross-encoder ms-marco-MiniLM-L-6-v2
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          PDF RAG ASSISTANT SYSTEM                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                            ┌─────────────────────┐
+                            │   Streamlit UI      │
+                            │   (app.py, ui.py)   │
+                            │  - Chat Interface   │
+                            │  - PDF Upload       │
+                            │  - Source Display   │
+                            └──────────┬──────────┘
+                                       │
+                                       │ HTTP
+                                       ▼
+                    ┌──────────────────────────────────────┐
+                    │      FastAPI Backend (api.py)        │
+                    │  ┌─────────────────────────────────┤ |
+                    │  │ ▪ POST /upload (PDF ingestion)  │ |
+                    │  │ ▪ POST /query (stream answers)  │ |
+                    │  │ ▪ GET /documents (list docs)    │ |
+                    │  │ ▪ GET /health (status check)    │ |
+                    │  └─────────────────────────────────┤ |
+                    └──┬───────────────────────────────────┘
+                       │
+        ┌──────────────┼──────────────┬──────────────┐
+        │              │              │              │
+        ▼              ▼              ▼              ▼
+   ┌─────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────┐
+   │Ingestion│  │  Retriever   │  │Reranker  │  │   LLM    │
+   │(PDF→    │  │  (Hybrid     │  │(Cross-   │  │(Answer   │
+   │ Chunks) │  │   Search)    │  │encoder)  │  │Generate) │
+   └────┬────┘  └──────┬───────┘  └────┬─────┘  └────┬─────┘
+        │              │               │              │
+        │     ┌────────┤               │              │
+        │     │        │               │              │
+        └─────┼────┬───┼───────────────┼──────────────┘
+              │    │   │               │
+              ▼    ▼   ▼               ▼
+        ┌──────────────────────────────────────────────┐
+        │        Embedding Models & LLM Services       │
+        │  ┌──────────────────────────────────────────┤|
+        │  │ • OpenAI Embeddings (text-embedding-3...)|│
+        │  │ • OpenAI Chat Model (gpt-4o-mini)        │|
+        │  │ • BM25 Keyword Retrieval                 |│
+        │  │ • HuggingFace Reranker                   |│
+        │  └──────────────────────────────────────────┤|
+        └──────────┬───────────────────────────────────┘
+                   │
+        ┌──────────┴──────────┐
+        │                     │
+        ▼                     ▼
+   ┌──────────────┐   ┌─────────────────┐
+   │ Chroma DB    │   │  OpenAI API     │
+   │(Vector Store)│   │  (External LLM) │
+   │  - Index     │   │  - Embeddings   │
+   │  - Persist   │   │  - Chat Model   │
+   └──────────────┘   └─────────────────┘
+```
+
+### Architecture Components Explained
+
+#### **1. Streamlit Frontend (UI Layer)**
+- **Files**: `app.py`, `ui.py`
+- **Purpose**: Provides an interactive chat interface for end users
+- **Features**:
+  - Real-time PDF document upload with progress tracking
+  - Persistent chat history within session
+  - Document filtering for targeted queries
+  - Source attribution (file name + page number)
+  - Token streaming for responsive answers
+- **How it works**: Communicates with FastAPI backend via HTTP requests, displays LLM responses in real-time
+
+#### **2. FastAPI Backend (API Layer)**
+- **File**: `api.py`
+- **Purpose**: Handles all business logic and orchestrates the RAG pipeline
+- **Key Endpoints**:
+  - `POST /upload`: Accepts PDF files and triggers ingestion pipeline
+  - `POST /query`: Accepts user queries and returns generated answers
+  - `GET /documents`: Lists all indexed documents in Chroma DB
+  - `GET /health`: System health check
+- **Responsibilities**: 
+  - CORS configuration for frontend access
+  - Request validation using Pydantic schemas
+  - Error handling and logging
+  - Pipeline orchestration
+
+#### **3. Document Ingestion Pipeline**
+- **File**: `ingestion.py`
+- **Process Flow**:
+  1. **Load**: Extract text from PDF using PyPDFLoader
+  2. **Chunk**: Split documents using RecursiveCharacterTextSplitter
+     - Configurable chunk size (default: 800 chars)
+     - Overlap for context preservation (default: 100 chars)
+  3. **Embed**: Generate embeddings using OpenAI's text-embedding-3-small
+  4. **Store**: Persist embeddings and metadata in Chroma DB
+  5. **Deduplicate**: Skip re-ingestion of already processed documents using SHA256 hash
+- **Output**: Indexed document chunks with metadata (source, page, content)
+
+#### **4. Retrieval System (Hybrid Search)**
+- **File**: `retriever.py`
+- **Retrieval Strategy** (from `retriever.py`):
+  1. **Query Expansion**: LLM generates 3 query rewrites to improve coverage
+  2. **Hybrid Retrieval**:
+     - **Vector Search**: MMR (Maximum Marginal Relevance) with k=8, fetch_k=25
+       - Balances relevance with diversity
+       - Uses semantic similarity from embeddings
+     - **Keyword Search**: BM25 algorithm with k=8
+       - Catches exact term matches that embeddings might miss
+     - **Fusion**: Combines both result sets for comprehensive coverage
+  3. **Document Filtering**: Optional filter by source documents
+- **Why Hybrid?**: Vector search excels at semantic matching, BM25 at exact terms. Combined = best of both worlds
+
+#### **5. Reranking Module**
+- **File**: `reranker.py`
+- **Purpose**: Re-rank retrieved chunks by relevance to create higher-quality context
+- **Model**: Cross-encoder (ms-marco-MiniLM-L-6-v2)
+  - Scores all retrieved chunks against the query
+  - Selects top-4 chunks (configurable)
+- **Benefit**: Filters out low-relevance results before going to LLM, improving answer quality and reducing token usage
+
+#### **6. LLM & Answer Generation**
+- **File**: `llm.py`
+- **Components**:
+  - **Chat Model**: OpenAI's gpt-4o-mini (configurable)
+  - **System Prompt**: Strict prompt enforcing context-only answers
+  - **Anti-Hallucination**: Returns "I don't know" if context is insufficient
+  - **Streaming**: Token-by-token generation for responsive UI
+- **Process**:
+  1. Format retrieved chunks as context
+  2. Inject user query into prompt
+  3. Generate answer respecting context boundaries
+  4. Stream tokens to UI for live feedback
+
+#### **7. Vector Store (Chroma DB)**
+- **Location**: `./chroma_db/` (persistent on disk)
+- **Purpose**: Centralized storage for:
+  - Document embeddings (vector representations)
+  - Document chunks (raw text)
+  - Metadata (file names, page numbers, hash IDs)
+- **Benefits**:
+  - Persistent storage survives application restarts
+  - Fast similarity search using vector indices
+  - Collection-based organization
+
+#### **8. Configuration Manager**
+- **File**: `config.py`
+- **Purpose**: Centralized settings management via environment variables
+- **Key Settings**:
+  - API credentials (OpenAI key, model names)
+  - Search parameters (chunk size, k values, rerank threshold)
+  - Upload limits (max file size, query length)
+  - Service endpoints (host, port, base URL)
+
+### Data Flow Through the System
+
+```
+User Input (PDF)
+       │
+       ▼
+┌──────────────┐
+│   Upload     │ → FastAPI /upload endpoint
+│   Endpoint   │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────────────────┐
+│  Ingestion Pipeline      │
+│  • Load PDF              │
+│  • Split into chunks     │
+│  • Generate embeddings   │
+│  • Store in Chroma       │
+└──────┬───────────────────┘
+       │
+       ▼
+Chroma Vector DB (indexed & persistent)
+       │
+       │
+User Query
+       │
+       ▼
+┌──────────────────────────┐
+│  Retrieval Pipeline      │
+│  • Expand query (3 ways) │
+│  • Hybrid search         │
+│    - Vector (MMR)        │
+│    - Keyword (BM25)      │
+│  • Combine results       │
+└──────┬───────────────────┘
+       │
+       ▼
+┌──────────────┐
+│   Reranker   │ → Cross-encoder scores
+│              │ → Selects top-4 chunks
+└──────┬───────┘
+       │
+       ▼
+┌──────────────────────────┐
+│   LLM Generation         │
+│   • Format context       │
+│   • Insert query         │
+│   • Generate answer      │
+│   • Stream tokens        │
+└──────┬───────────────────┘
+       │
+       ▼
+Streamlit UI (displays answer + sources)
+```
+
+### Technology Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Frontend** | Streamlit | Interactive chat UI |
+| **Backend** | FastAPI | REST API & orchestration |
+| **Vector DB** | Chroma | Document embeddings & storage |
+| **Embeddings** | OpenAI (text-embedding-3-small) | Semantic representation |
+| **LLM** | OpenAI (gpt-4o-mini) | Answer generation |
+| **Reranking** | HuggingFace Cross-encoder | Relevance scoring |
+| **Keyword Search** | BM25 (rank-bm25) | Exact term matching |
+| **PDF Processing** | PyPDF | Document extraction |
+| **Validation** | Pydantic | Schema validation |
+
+### Key Design Principles
+
+1. **Modularity**: Each component (ingestion, retrieval, reranking, generation) is independently testable and replaceable
+2. **Hybrid Retrieval**: Combines semantic and keyword search for comprehensive results
+3. **Anti-Hallucination**: Strict prompting ensures LLM only uses provided context
+4. **Persistence**: Chroma DB stores embeddings permanently, avoiding re-processing
+5. **Streaming**: Token streaming provides real-time user feedback
+6. **Configurability**: All parameters are environment-driven for easy deployment flexibility
 
 ## Project Structure
 
