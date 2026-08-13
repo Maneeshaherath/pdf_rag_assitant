@@ -111,21 +111,18 @@ def merge_and_deduplicate(doc_lists: list[list[Document]]) -> list[Document]:
     return list(dedup.values())
 
 
-def retrieve_documents(
-    query: str,
+def hybrid_retrieve(
+    queries: list[str],
     vector_store,
-    llm,
     settings: Settings,
     doc_names: list[str] | None = None,
     k: int | None = None,
     fetch_k: int | None = None,
-) -> tuple[list[str], list[Document]]:
-    """Hybrid retrieval: query expansion + MMR vector retrieval + BM25 retrieval."""
-
-    expanded_queries = expand_query(query, llm=llm, n=settings.query_expansions)
+) -> list[Document]:
+    """Run MMR + BM25 for each query and merge unique chunks."""
 
     all_results: list[list[Document]] = []
-    for q in expanded_queries:
+    for q in queries:
         vector_docs = _vector_mmr_retrieve(
             vector_store=vector_store,
             query=q,
@@ -143,6 +140,28 @@ def retrieve_documents(
         all_results.append(vector_docs)
         all_results.append(keyword_docs)
 
-    merged = merge_and_deduplicate(all_results)
+    return merge_and_deduplicate(all_results)
+
+
+def retrieve_documents(
+    query: str,
+    vector_store,
+    llm,
+    settings: Settings,
+    doc_names: list[str] | None = None,
+    k: int | None = None,
+    fetch_k: int | None = None,
+) -> tuple[list[str], list[Document]]:
+    """Hybrid retrieval: query expansion + MMR vector retrieval + BM25 retrieval."""
+
+    expanded_queries = expand_query(query, llm=llm, n=settings.query_expansions)
+    merged = hybrid_retrieve(
+        queries=expanded_queries,
+        vector_store=vector_store,
+        settings=settings,
+        doc_names=doc_names,
+        k=k,
+        fetch_k=fetch_k,
+    )
     logger.info("retrieval_complete query=%s expanded=%s docs=%s", query, expanded_queries, len(merged))
     return expanded_queries, merged
