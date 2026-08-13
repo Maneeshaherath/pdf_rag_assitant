@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     retrieval_k: int = Field(default=8, alias="RETRIEVAL_K")
     retrieval_fetch_k: int = Field(default=25, alias="RETRIEVAL_FETCH_K")
     rerank_top_n: int = Field(default=4, alias="RERANK_TOP_N")
+    rerank_min_score: float = Field(default=0.0, alias="RERANK_MIN_SCORE")
+    rag_max_retries: int = Field(default=1, alias="RAG_MAX_RETRIES")
     bm25_k: int = Field(default=8, alias="BM25_K")
     query_expansions: int = Field(default=3, alias="QUERY_EXPANSIONS")
 
