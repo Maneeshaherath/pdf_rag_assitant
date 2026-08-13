@@ -12,10 +12,11 @@ from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 
 from config import get_settings
+from graph.nodes import REFUSE_ANSWER
+from graph.rag_graph import build_rag_graph
+from graph.state import RAGState
 from ingestion import ingest_pdf_bytes
-from llm import format_sources, generate_answer, get_chat_model, stream_answer
-from reranker import rerank_documents
-from retriever import retrieve_documents
+from llm import stream_answer
 from schemas import QueryRequest, QueryResponse, RetrievedChunk, UploadResponse, UploadResponseItem
 
 logging.basicConfig(level=logging.INFO)
@@ -109,84 +110,89 @@ async def upload(files: list[UploadFile] = File(...)) -> UploadResponse:
     return UploadResponse(ingested=results)
 
 
-async def _prepare_query(request: QueryRequest):
+def _validate_query(request: QueryRequest) -> None:
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query is empty")
     if len(request.query) > settings.max_query_chars:
         raise HTTPException(status_code=400, detail=f"Query exceeds {settings.max_query_chars} characters")
 
+
+def _initial_state(request: QueryRequest, skip_generate: bool = False) -> RAGState:
+    return {
+        "query": request.query,
+        "doc_names": request.doc_names,
+        "k": request.k,
+        "fetch_k": request.fetch_k,
+        "expanded_queries": [],
+        "retrieved": [],
+        "reranked": [],
+        "top_docs": [],
+        "sources": [],
+        "answer": "",
+        "retry_count": 0,
+        "context_ok": False,
+        "skip_generate": skip_generate,
+    }
+
+
+def _debug_chunks(state: RAGState, debug: bool) -> list[RetrievedChunk] | None:
+    if not debug:
+        return None
+    return [
+        RetrievedChunk(
+            chunk_id=doc.metadata.get("chunk_id", "unknown"),
+            source=doc.metadata.get("file_name", doc.metadata.get("source", "uploaded.pdf")),
+            page=doc.metadata.get("page"),
+            score=score,
+            content=doc.page_content,
+        )
+        for doc, score in state.get("reranked") or []
+    ]
+
+
+async def _run_rag(request: QueryRequest, skip_generate: bool = False) -> RAGState:
+    _validate_query(request)
     vector_store = _get_vector_store()
-    expander_llm = get_chat_model(settings, streaming=False)
-
-    expanded_queries, retrieved = await asyncio.to_thread(
-        retrieve_documents,
-        request.query,
-        vector_store,
-        expander_llm,
-        settings,
-        request.doc_names,
-        request.k,
-        request.fetch_k,
-    )
-
-    reranked = await asyncio.to_thread(
-        rerank_documents,
-        request.query,
-        retrieved,
-        request.k or settings.rerank_top_n,
-    )
-
-    top_docs = [doc for doc, _ in reranked]
-    sources = format_sources(top_docs)
-
+    graph = build_rag_graph(vector_store, settings)
+    state = await asyncio.to_thread(graph.invoke, _initial_state(request, skip_generate=skip_generate))
     logger.info(
-        "query_prepared query=%s expanded=%s retrieved=%s reranked=%s",
+        "query_graph_complete query=%s expanded=%s retrieved=%s reranked=%s retry=%s refused=%s",
         request.query,
-        expanded_queries,
-        len(retrieved),
-        len(top_docs),
+        state.get("expanded_queries"),
+        len(state.get("retrieved") or []),
+        len(state.get("top_docs") or []),
+        state.get("retry_count", 0),
+        state.get("answer") == REFUSE_ANSWER,
     )
-
-    return expanded_queries, retrieved, reranked, top_docs, sources
+    return state
 
 
 @app.post("/query", response_model=QueryResponse)
 async def query(request: QueryRequest) -> QueryResponse:
-    expanded_queries, retrieved, reranked, top_docs, sources = await _prepare_query(request)
-
-    answer = await asyncio.to_thread(generate_answer, request.query, top_docs, settings)
-
-    chunks: list[RetrievedChunk] | None = None
-    if request.debug:
-        chunks = [
-            RetrievedChunk(
-                chunk_id=doc.metadata.get("chunk_id", "unknown"),
-                source=doc.metadata.get("file_name", doc.metadata.get("source", "uploaded.pdf")),
-                page=doc.metadata.get("page"),
-                score=score,
-                content=doc.page_content,
-            )
-            for doc, score in reranked
-        ]
-
+    state = await _run_rag(request, skip_generate=False)
     return QueryResponse(
-        answer=answer,
-        sources=sources,
-        expanded_queries=expanded_queries,
-        retrieved_count=len(retrieved),
-        chunks=chunks,
+        answer=state.get("answer") or REFUSE_ANSWER,
+        sources=state.get("sources") or [],
+        expanded_queries=state.get("expanded_queries") or [],
+        retrieved_count=len(state.get("retrieved") or []),
+        chunks=_debug_chunks(state, request.debug),
     )
 
 
 @app.post("/query/stream")
 async def query_stream(request: QueryRequest) -> StreamingResponse:
-    expanded_queries, retrieved, reranked, top_docs, sources = await _prepare_query(request)
-
+    state = await _run_rag(request, skip_generate=True)
+    top_docs = state.get("top_docs") or []
+    sources = state.get("sources") or []
+    expanded_queries = state.get("expanded_queries") or []
+    retrieved = state.get("retrieved") or []
     async def event_generator():
         try:
-            for token in stream_answer(request.query, top_docs, settings):
-                payload = {"type": "token", "data": {"token": token}}
-                yield json.dumps(payload) + "\n"
+            if not state.get("context_ok") or not top_docs:
+                yield json.dumps({"type": "token", "data": {"token": REFUSE_ANSWER}}) + "\n"
+            else:
+                for token in stream_answer(request.query, top_docs, settings):
+                    yield json.dumps({"type": "token", "data": {"token": token}}) + "\n"
 
             end_payload = {
                 "type": "end",
@@ -202,7 +208,7 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
                             "score": score,
                             "content": doc.page_content,
                         }
-                        for doc, score in reranked
+                        for doc, score in state.get("reranked") or []
                     ]
                     if request.debug
                     else None,
@@ -211,8 +217,7 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
             yield json.dumps(end_payload) + "\n"
         except Exception as exc:
             logger.exception("query_stream_failed")
-            error_payload = {"type": "error", "data": {"message": str(exc)}}
-            yield json.dumps(error_payload) + "\n"
+            yield json.dumps({"type": "error", "data": {"message": str(exc)}}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
