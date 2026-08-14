@@ -22,7 +22,12 @@ def make_nodes(vector_store, settings: Settings):
 
     def expand_node(state: RAGState) -> dict:
         llm = get_chat_model(settings, streaming=False)
-        queries = expand_query(state["query"], llm=llm, n=settings.query_expansions)
+        queries = expand_query(
+            state["query"],
+            llm=llm,
+            n=settings.query_expansions,
+            doc_names=state.get("doc_names"),
+        )
         logger.info("graph_expand query=%s queries=%s", state["query"], queries)
         return {"expanded_queries": queries}
 
@@ -41,7 +46,9 @@ def make_nodes(vector_store, settings: Settings):
 
     def rerank_node(state: RAGState) -> dict:
         top_n = state.get("k") or settings.rerank_top_n
-        ranked = rerank_documents(state["query"], state.get("retrieved") or [], top_n=top_n)
+        queries = state.get("expanded_queries") or [state["query"]]
+        rerank_query = queries[1] if len(queries) > 1 else queries[0]
+        ranked = rerank_documents(rerank_query, state.get("retrieved") or [], top_n=top_n)
         top_docs = [doc for doc, _ in ranked]
         sources = format_sources(top_docs)
         logger.info("graph_rerank kept=%s", len(ranked))
@@ -72,12 +79,15 @@ Return only valid JSON: {{"queries": ["q1", "q2"]}}
 Rules:
 - Keep the same intent.
 - Use concrete terms that might appear in PDFs.
+- Fix likely typos using the document titles when obvious.
 - Do not add facts.
 - Produce exactly 2 rewrites.
+Document titles: {titles}
 Question: {question}
 """.strip()
         )
-        raw = llm.invoke(prompt.format_messages(question=state["query"])).content
+        titles = ", ".join(state.get("doc_names") or []) or "(none)"
+        raw = llm.invoke(prompt.format_messages(question=state["query"], titles=titles)).content
         extra: list[str] = []
         try:
             payload = json.loads(raw)
@@ -98,7 +108,9 @@ Question: {question}
         docs = state.get("top_docs") or []
         if not docs:
             return {"answer": REFUSE_ANSWER}
-        answer = generate_answer(state["query"], docs, settings)
+        queries = state.get("expanded_queries") or [state["query"]]
+        gen_query = queries[1] if len(queries) > 1 else queries[0]
+        answer = generate_answer(gen_query, docs, settings)
         return {"answer": answer, "sources": format_sources(docs)}
 
     def refuse_node(state: RAGState) -> dict:

@@ -17,9 +17,15 @@ def _normalize_tokens(text: str) -> list[str]:
     return [tok for tok in text.lower().split() if tok]
 
 
-def expand_query(question: str, llm, n: int = 3) -> list[str]:
-    """Create semantic query variations to increase recall."""
+def expand_query(
+    question: str,
+    llm,
+    n: int = 3,
+    doc_names: list[str] | None = None,
+) -> list[str]:
+    """Create semantic query variations to increase recall, including likely typo fixes."""
 
+    titles = ", ".join(doc_names) if doc_names else "(none provided)"
     prompt = ChatPromptTemplate.from_template(
         """
 You rewrite user questions for document retrieval.
@@ -29,12 +35,14 @@ Rules:
 - Keep intent identical.
 - Keep each rewrite short.
 - Do not add facts.
+- If the question looks misspelled, include a corrected version that matches the document titles when obvious (example: paring -> parsing).
 - Produce exactly {n} rewrites.
+Document titles: {titles}
 Question: {question}
 """.strip()
     )
 
-    raw = llm.invoke(prompt.format_messages(question=question, n=n)).content
+    raw = llm.invoke(prompt.format_messages(question=question, n=n, titles=titles)).content
     queries = [question]
 
     try:
@@ -154,7 +162,12 @@ def retrieve_documents(
 ) -> tuple[list[str], list[Document]]:
     """Hybrid retrieval: query expansion + MMR vector retrieval + BM25 retrieval."""
 
-    expanded_queries = expand_query(query, llm=llm, n=settings.query_expansions)
+    expanded_queries = expand_query(
+        query,
+        llm=llm,
+        n=settings.query_expansions,
+        doc_names=doc_names,
+    )
     merged = hybrid_retrieve(
         queries=expanded_queries,
         vector_store=vector_store,

@@ -217,7 +217,8 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
             if not state.get("context_ok") or not top_docs:
                 yield json.dumps({"type": "token", "data": {"token": REFUSE_ANSWER}}) + "\n"
             else:
-                for token in stream_answer(request.query, top_docs, settings):
+                gen_query = expanded_queries[1] if len(expanded_queries) > 1 else request.query
+                for token in stream_answer(gen_query, top_docs, settings):
                     yield json.dumps({"type": "token", "data": {"token": token}}) + "\n"
 
             end_payload = {

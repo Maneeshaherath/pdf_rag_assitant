@@ -36,7 +36,9 @@ def _messages(query: str, docs: list[Document]) -> list:
     strict_system = (
         "You are a strict retrieval QA assistant. "
         "Answer ONLY using the provided context. "
-        "If the context is insufficient, respond exactly with: I don't know. "
+        "The question may contain typos; if the context clearly answers the intended topic "
+        "(for example paring vs parsing), answer from the context using the correct term. "
+        "If the context is still insufficient, respond exactly with: I don't know. "
         "Do not invent facts. "
         "Cite sources at the end as [n] markers that match context blocks."
     )
