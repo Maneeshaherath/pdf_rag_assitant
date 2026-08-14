@@ -22,7 +22,11 @@ settings = get_settings()
 def get_cached_embeddings() -> OpenAIEmbeddings:
     """Cache embeddings client across reruns."""
 
-    return OpenAIEmbeddings(model=settings.embedding_model, chunk_size=settings.embedding_batch_size)
+    return OpenAIEmbeddings(
+        model=settings.embedding_model,
+        chunk_size=settings.embedding_batch_size,
+        api_key=settings.openai_api_key or None,
+    )
 
 
 @st.cache_resource

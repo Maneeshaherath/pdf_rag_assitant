@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -56,8 +57,32 @@ class Settings(BaseSettings):
         return path
 
 
+def _streamlit_secret_key() -> str:
+    """Read OPENAI_API_KEY from Streamlit secrets if present (local UI setup)."""
+
+    path = Path(".streamlit/secrets.toml")
+    if not path.exists():
+        return ""
+    try:
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    value = data.get("OPENAI_API_KEY") or data.get("openai_api_key") or ""
+    return str(value).strip()
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return singleton settings instance."""
+    """Return singleton settings instance and export the OpenAI key for clients."""
 
-    return Settings()
+    if not os.getenv("OPENAI_API_KEY"):
+        secret = _streamlit_secret_key()
+        if secret:
+            os.environ["OPENAI_API_KEY"] = secret
+
+    settings = Settings()
+    if settings.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    return settings

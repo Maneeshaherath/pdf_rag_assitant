@@ -37,8 +37,25 @@ app.add_middleware(
 )
 
 
+def _require_openai_key() -> None:
+    if not settings.openai_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "OPENAI_API_KEY is not set. In PowerShell use "
+                '$env:OPENAI_API_KEY="your-key" then restart uvicorn, '
+                "or put OPENAI_API_KEY in a .env file or .streamlit/secrets.toml."
+            ),
+        )
+
+
 def _get_vector_store() -> Chroma:
-    embeddings = OpenAIEmbeddings(model=settings.embedding_model, chunk_size=settings.embedding_batch_size)
+    _require_openai_key()
+    embeddings = OpenAIEmbeddings(
+        model=settings.embedding_model,
+        chunk_size=settings.embedding_batch_size,
+        api_key=settings.openai_api_key,
+    )
     return Chroma(
         collection_name=settings.chroma_collection,
         embedding_function=embeddings,
@@ -46,9 +63,18 @@ def _get_vector_store() -> Chroma:
     )
 
 
+@app.get("/")
+async def root() -> dict[str, Any]:
+    return {"ok": True, "docs": "/docs", "health": "/health"}
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "collection": settings.chroma_collection}
+    return {
+        "ok": True,
+        "collection": settings.chroma_collection,
+        "openai_key_set": bool(settings.openai_api_key),
+    }
 
 
 @app.get("/documents")

@@ -330,21 +330,29 @@ pip install -r requirements.txt
 
 4. Configure API key
 
-Option A: environment variable (recommended for backend)
+Option A: `.env` file in the project root (works for both API and UI)
 
-Windows CMD:
-
-```bash
-set OPENAI_API_KEY=YOUR_NEW_KEY
+```
+OPENAI_API_KEY=YOUR_NEW_KEY
 ```
 
-PowerShell:
+Copy from `.env.example`. Do not use spaces around `=`.
 
-```bash
+Option B: PowerShell (this session only; restart uvicorn after)
+
+```powershell
 $env:OPENAI_API_KEY="YOUR_NEW_KEY"
 ```
 
-Option B: Streamlit secrets (UI)
+Windows CMD:
+
+```bat
+set OPENAI_API_KEY=YOUR_NEW_KEY
+```
+
+Do not run `OPENAI_API_KEY = "..."` in PowerShell — that is not valid.
+
+Option C: Streamlit secrets (also loaded by the FastAPI backend)
 
 Create `.streamlit/secrets.toml` with:
 
@@ -398,25 +406,25 @@ All main settings are centralized in `config.py`, including:
 
 ## Common Troubleshooting
 
-1. 401 Unauthorized from OpenAI
-- Wrong key or stale terminal env variable
-- Re-set OPENAI_API_KEY in the same terminal where Uvicorn starts
+1. 401 Unauthorized from OpenAI, or `OPENAI_API_KEY is missing`
+- PowerShell must use `$env:OPENAI_API_KEY="..."`, then restart uvicorn
+- Or put the key in `.env` / `.streamlit/secrets.toml` and restart
+- Do not recreate `venv` while it is activated (`Permission denied` on `python.exe`)
 
-2. Long first response time
+2. `GET /` returns 404
+- Use http://127.0.0.1:8000/docs or `/health`. `GET /json/version` is the browser DevTools, ignore it.
+
+3. Streamlit `No module named 'torchvision'`
+- Harmless file-watcher noise from `transformers`. The chat app does not need torchvision.
+- Optional: `$env:STREAMLIT_SERVER_FILE_WATCHER_TYPE="none"` before `streamlit run app.py`
+
+4. Long first response time
 - First reranker load downloads model weights once
 - Later queries are much faster due to cache
 
-3. Empty document filter
+5. Empty document filter
 - Ensure upload succeeded
 - Check GET /documents endpoint
-
-4. Streamlit noisy transformer warnings
-- Optional workaround: disable watcher in terminal before launch
-
-```bash
-set STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
-streamlit run app.py
-```
 
 ## Deployment Notes
 

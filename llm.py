@@ -10,13 +10,16 @@ from config import Settings
 
 
 def get_chat_model(settings: Settings, streaming: bool = False) -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.chat_model,
-        temperature=0,
-        max_retries=2,
-        timeout=60,
-        streaming=streaming,
-    )
+    kwargs: dict = {
+        "model": settings.chat_model,
+        "temperature": 0,
+        "max_retries": 2,
+        "timeout": 60,
+        "streaming": streaming,
+    }
+    if settings.openai_api_key:
+        kwargs["api_key"] = settings.openai_api_key
+    return ChatOpenAI(**kwargs)
 
 
 def _build_context(docs: list[Document]) -> str:
