@@ -415,8 +415,7 @@ All main settings are centralized in `config.py`, including:
 - Use http://127.0.0.1:8000/docs or `/health`. `GET /json/version` is the browser DevTools, ignore it.
 
 3. Streamlit `No module named 'torchvision'`
-- Harmless file-watcher noise from `transformers`. The chat app does not need torchvision.
-- Optional: `$env:STREAMLIT_SERVER_FILE_WATCHER_TYPE="none"` before `streamlit run app.py`
+- Harmless leftover from Streamlit scanning `transformers`. Disabled in `.streamlit/config.toml` (`fileWatcherType = "none"`). Restart Streamlit after pulling this change.
 
 4. Long first response time
 - First reranker load downloads model weights once
