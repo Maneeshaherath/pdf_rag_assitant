@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -11,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 
-from config import get_settings
+from config import _looks_like_langsmith_key, get_settings
 from graph.nodes import REFUSE_ANSWER
 from graph.rag_graph import build_rag_graph
 from graph.state import RAGState
@@ -26,6 +27,22 @@ settings = get_settings()
 
 if not settings.openai_api_key:
     logger.warning("OPENAI_API_KEY is missing. API calls to OpenAI will fail until it is set.")
+
+if settings.langsmith_tracing:
+    if _looks_like_langsmith_key(settings.langsmith_api_key):
+        logger.info("langsmith_tracing_enabled project=%s", os.getenv("LANGSMITH_PROJECT"))
+        key = settings.langsmith_api_key.strip().strip('"')
+        if key.startswith("lsv2_pt_"):
+            logger.warning(
+                "LANGSMITH_API_KEY looks like a personal token (lsv2_pt_). "
+                "Trace ingest often returns 403. Create a service API key (lsv2_sk_) "
+                "in LangSmith Settings > API Keys, and set LANGSMITH_WORKSPACE_ID if asked."
+            )
+    else:
+        logger.warning(
+            "LANGSMITH_TRACING is true but LANGSMITH_API_KEY is missing or still a placeholder. "
+            "Replace <your-api-key> in .env with a real key from https://smith.langchain.com"
+        )
 
 app = FastAPI(title="Production RAG API", version="1.0.0")
 app.add_middleware(
@@ -74,6 +91,9 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "collection": settings.chroma_collection,
         "openai_key_set": bool(settings.openai_api_key),
+        "langsmith_tracing": bool(settings.langsmith_tracing),
+        "langsmith_key_set": _looks_like_langsmith_key(settings.langsmith_api_key),
+        "langsmith_project": os.getenv("LANGSMITH_PROJECT", settings.langsmith_project),
     }
 
 
@@ -176,11 +196,34 @@ def _debug_chunks(state: RAGState, debug: bool) -> list[RetrievedChunk] | None:
     ]
 
 
+def _invoke_graph(graph, state: RAGState, query: str) -> RAGState:
+    result = graph.invoke(
+        state,
+        config={
+            "run_name": "pdf-rag-query",
+            "tags": ["pdf-rag"],
+            "metadata": {"query": query},
+        },
+    )
+    try:
+        from langchain_core.tracers.langchain import wait_for_all_tracers
+
+        wait_for_all_tracers()
+    except Exception:
+        logger.debug("langsmith_flush_skipped", exc_info=True)
+    return result
+
+
 async def _run_rag(request: QueryRequest, skip_generate: bool = False) -> RAGState:
     _validate_query(request)
     vector_store = _get_vector_store()
     graph = build_rag_graph(vector_store, settings)
-    state = await asyncio.to_thread(graph.invoke, _initial_state(request, skip_generate=skip_generate))
+    state = await asyncio.to_thread(
+        _invoke_graph,
+        graph,
+        _initial_state(request, skip_generate=skip_generate),
+        request.query,
+    )
     logger.info(
         "query_graph_complete query=%s expanded=%s retrieved=%s reranked=%s retry=%s refused=%s",
         request.query,

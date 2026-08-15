@@ -6,6 +6,7 @@ It combines:
 - FastAPI backend for ingestion and query APIs
 - Streamlit frontend with a modern chat experience
 - LangGraph to orchestrate query-time RAG (retrieve, grade, retry, generate)
+- LangSmith to trace graph runs, tokens, latency, and cost
 - Chroma persistent vector database for document memory
 - Hybrid retrieval plus reranking for better answer quality
 
@@ -21,6 +22,7 @@ It combines:
   - Vector and BM25 run in parallel
 - Re-ranks retrieved chunks with a cross-encoder model
 - LangGraph grades context, retries once if weak, or returns "I don't know"
+- Traces each query in LangSmith (nodes, tokens, latency, cost)
 - Generates grounded answers from context only
 - Streams answer tokens in UI
 - Shows sources (file and page)
@@ -257,6 +259,7 @@ Streamlit UI (displays answer + sources)
 | **Frontend** | Streamlit | Interactive chat UI |
 | **Backend** | FastAPI | REST API & upload |
 | **Query orchestration** | LangGraph | Expand → retrieve → rerank → grade → generate / retry / refuse |
+| **Observability** | LangSmith | Traces, token usage, latency, and cost |
 | **Vector DB** | Chroma | Document embeddings & storage |
 | **Embeddings** | OpenAI (text-embedding-3-small) | Semantic representation |
 | **LLM** | OpenAI (gpt-4o-mini) | Expansion, rewrite, answers |
@@ -280,7 +283,8 @@ Streamlit UI (displays answer + sources)
 - ui.py: Streamlit chat UI
 - api.py: FastAPI server; `/query` invokes LangGraph
 - graph/: RAG state, nodes, and compiled graph
-- config.py: central settings
+- docs/langsmith/: LangSmith dashboard screenshots
+- config.py: central settings (including LangSmith env export)
 - schemas.py: request and response schemas
 - ingestion.py: PDF load, chunk, metadata, dedup
 - retriever.py: query expansion plus parallel hybrid retrieval
@@ -290,6 +294,7 @@ Streamlit UI (displays answer + sources)
 ## Features
 
 - LangGraph query flow with one rewrite retry and refuse-on-weak-context
+- LangSmith tracing for graph runs (tokens, LLM count, latency, cost)
 - MMR retriever with configurable k and fetch_k
 - LLM query expansion (multiple rewrites, typo-aware)
 - Hybrid retrieval (vector plus BM25 in parallel)
@@ -305,6 +310,7 @@ Streamlit UI (displays answer + sources)
 
 - Python 3.10 or newer
 - OpenAI API key
+- Optional: LangSmith API key (service key `lsv2_sk_`) for traces
 - Windows, Linux, or macOS
 
 ## Clone and Run
@@ -370,6 +376,16 @@ Create `.streamlit/secrets.toml` with:
 OPENAI_API_KEY = "YOUR_NEW_KEY"
 ```
 
+LangSmith (optional traces of the RAG graph):
+
+```
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=lsv2_your_real_key
+LANGSMITH_PROJECT=pdf-rag
+```
+
+Replace `<your-api-key>` with a **service** key (`lsv2_sk_...`) from https://smith.langchain.com. Personal tokens (`lsv2_pt_`) often return 403. Restart uvicorn. Check `GET /health` — `langsmith_tracing` and `langsmith_key_set` must be `true`. Traces appear under `LANGSMITH_PROJECT`.
+
 5. Start backend
 
 ```bash
@@ -388,6 +404,31 @@ streamlit run app.py
 - Upload PDFs from sidebar
 - Ask questions in the chat box at bottom
 
+## LangSmith observability
+
+Each `/query` and `/query/stream` run is sent to LangSmith as `pdf-rag-query`. You can inspect expand → retrieve → rerank → grade → generate (or rewrite / refuse), plus OpenAI calls.
+
+Setup is `.env` only (see Clone and Run). The API copies `LANGSMITH_*` into the process environment so LangChain tracers can see them.
+
+### Proof: live dashboard
+
+After a successful query, LangSmith shows token usage, LLM count, latency, and cost:
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/langsmith/tokens.png" alt="LangSmith token usage" width="400" />
+      <br />Token usage
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/langsmith/llm-metrics.png" alt="LangSmith LLM count, latency, and cost" width="400" />
+      <br />LLM count, latency, and cost
+    </td>
+  </tr>
+</table>
+
+These screenshots are from this project after tracing was enabled (15 Aug 2026).
+
 ## API Endpoints
 
 - GET /
@@ -405,6 +446,7 @@ All main settings are centralized in `config.py`, including:
 - chunk size and overlap
 - retrieval and reranking limits (`RERANK_TOP_N`, `RERANK_MIN_SCORE`)
 - LangGraph retry cap (`RAG_MAX_RETRIES`, default 1)
+- LangSmith tracing (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`)
 - max query length and max upload size
 - API host and port
 - Chroma path
@@ -436,6 +478,13 @@ All main settings are centralized in `config.py`, including:
 5. Empty document filter
 - Ensure upload succeeded
 - Check GET /documents endpoint
+
+6. LangSmith `403 Forbidden` on `/runs/multipart`
+- Tracing is on; LangSmith rejected the key. `lsv2_pt_` personal tokens often cannot ingest traces.
+- Create a **service API key** (`lsv2_sk_`) under LangSmith → Settings → API Keys
+- If the UI is EU, set `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com`
+- Optionally set `LANGSMITH_WORKSPACE_ID` from workspace settings
+- Restart uvicorn after changing `.env`
 
 ## Deployment Notes
 
