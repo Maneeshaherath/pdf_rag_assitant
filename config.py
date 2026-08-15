@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -25,6 +26,8 @@ class Settings(BaseSettings):
     retrieval_k: int = Field(default=8, alias="RETRIEVAL_K")
     retrieval_fetch_k: int = Field(default=25, alias="RETRIEVAL_FETCH_K")
     rerank_top_n: int = Field(default=4, alias="RERANK_TOP_N")
+    rerank_min_score: float = Field(default=0.0, alias="RERANK_MIN_SCORE")
+    rag_max_retries: int = Field(default=1, alias="RAG_MAX_RETRIES")
     bm25_k: int = Field(default=8, alias="BM25_K")
     query_expansions: int = Field(default=3, alias="QUERY_EXPANSIONS")
 
@@ -54,8 +57,32 @@ class Settings(BaseSettings):
         return path
 
 
+def _streamlit_secret_key() -> str:
+    """Read OPENAI_API_KEY from Streamlit secrets if present (local UI setup)."""
+
+    path = Path(".streamlit/secrets.toml")
+    if not path.exists():
+        return ""
+    try:
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    value = data.get("OPENAI_API_KEY") or data.get("openai_api_key") or ""
+    return str(value).strip()
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return singleton settings instance."""
+    """Return singleton settings instance and export the OpenAI key for clients."""
 
-    return Settings()
+    if not os.getenv("OPENAI_API_KEY"):
+        secret = _streamlit_secret_key()
+        if secret:
+            os.environ["OPENAI_API_KEY"] = secret
+
+    settings = Settings()
+    if settings.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    return settings

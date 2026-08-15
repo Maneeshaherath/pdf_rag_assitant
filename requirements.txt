@@ -3,6 +3,7 @@ langchain
 langchain-chroma
 langchain-community
 langchain-openai
+langgraph
 pydantic-settings
 pypdf
 python-multipart

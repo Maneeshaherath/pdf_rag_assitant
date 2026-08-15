@@ -10,13 +10,16 @@ from config import Settings
 
 
 def get_chat_model(settings: Settings, streaming: bool = False) -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.chat_model,
-        temperature=0,
-        max_retries=2,
-        timeout=60,
-        streaming=streaming,
-    )
+    kwargs: dict = {
+        "model": settings.chat_model,
+        "temperature": 0,
+        "max_retries": 2,
+        "timeout": 60,
+        "streaming": streaming,
+    }
+    if settings.openai_api_key:
+        kwargs["api_key"] = settings.openai_api_key
+    return ChatOpenAI(**kwargs)
 
 
 def _build_context(docs: list[Document]) -> str:
@@ -33,7 +36,9 @@ def _messages(query: str, docs: list[Document]) -> list:
     strict_system = (
         "You are a strict retrieval QA assistant. "
         "Answer ONLY using the provided context. "
-        "If the context is insufficient, respond exactly with: I don't know. "
+        "The question may contain typos; if the context clearly answers the intended topic "
+        "(for example paring vs parsing), answer from the context using the correct term. "
+        "If the context is still insufficient, respond exactly with: I don't know. "
         "Do not invent facts. "
         "Cite sources at the end as [n] markers that match context blocks."
     )
