@@ -370,6 +370,16 @@ Create `.streamlit/secrets.toml` with:
 OPENAI_API_KEY = "YOUR_NEW_KEY"
 ```
 
+LangSmith (optional traces of the RAG graph):
+
+```
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=lsv2_your_real_key
+LANGSMITH_PROJECT=pdf-rag
+```
+
+Replace `<your-api-key>` with a real key from https://smith.langchain.com. Restart uvicorn. Check `GET /health` — `langsmith_key_set` must be `true`. Traces appear under that project name.
+
 5. Start backend
 
 ```bash
@@ -405,6 +415,7 @@ All main settings are centralized in `config.py`, including:
 - chunk size and overlap
 - retrieval and reranking limits (`RERANK_TOP_N`, `RERANK_MIN_SCORE`)
 - LangGraph retry cap (`RAG_MAX_RETRIES`, default 1)
+- LangSmith tracing (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`)
 - max query length and max upload size
 - API host and port
 - Chroma path
@@ -436,6 +447,13 @@ All main settings are centralized in `config.py`, including:
 5. Empty document filter
 - Ensure upload succeeded
 - Check GET /documents endpoint
+
+6. LangSmith `403 Forbidden` on `/runs/multipart`
+- Tracing is on; LangSmith rejected the key. `lsv2_pt_` personal tokens often cannot ingest traces.
+- Create a **service API key** (`lsv2_sk_`) under LangSmith → Settings → API Keys
+- If the UI is EU, set `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com`
+- Optionally set `LANGSMITH_WORKSPACE_ID` from workspace settings
+- Restart uvicorn after changing `.env`
 
 ## Deployment Notes
 

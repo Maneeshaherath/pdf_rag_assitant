@@ -4,7 +4,9 @@ langchain-chroma
 langchain-community
 langchain-openai
 langgraph
+langsmith
 pydantic-settings
+python-dotenv
 pypdf
 python-multipart
 rank-bm25

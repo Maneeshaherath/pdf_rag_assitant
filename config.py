@@ -4,8 +4,11 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -42,6 +45,12 @@ class Settings(BaseSettings):
 
     debug_chunks: bool = Field(default=False, alias="DEBUG_CHUNKS")
 
+    langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
+    langsmith_api_key: str = Field(default="", alias="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="pdf-rag", alias="LANGSMITH_PROJECT")
+    langsmith_endpoint: str = Field(default="https://api.smith.langchain.com", alias="LANGSMITH_ENDPOINT")
+    langsmith_workspace_id: str = Field(default="", alias="LANGSMITH_WORKSPACE_ID")
+
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
@@ -73,9 +82,40 @@ def _streamlit_secret_key() -> str:
     return str(value).strip()
 
 
+def _looks_like_langsmith_key(value: str) -> bool:
+    key = value.strip().strip('"').strip("'")
+    if not key or key in {"<your-api-key>", "your-api-key", "lsv2_..."}:
+        return False
+    return key.startswith("lsv") or key.startswith("ls-")
+
+
+def _export_langsmith(settings: Settings) -> None:
+    """LangSmith/LangChain tracers read os.environ, not pydantic Settings."""
+
+    project = settings.langsmith_project.strip().strip('"').strip("'")
+    endpoint = settings.langsmith_endpoint.strip().strip('"').strip("'")
+    key = settings.langsmith_api_key.strip().strip('"').strip("'")
+    workspace = settings.langsmith_workspace_id.strip().strip('"').strip("'")
+
+    if settings.langsmith_tracing:
+        os.environ["LANGSMITH_TRACING"] = "true"
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    if project:
+        os.environ["LANGSMITH_PROJECT"] = project
+        os.environ["LANGCHAIN_PROJECT"] = project
+    if endpoint:
+        os.environ["LANGSMITH_ENDPOINT"] = endpoint
+    if workspace:
+        os.environ["LANGSMITH_WORKSPACE_ID"] = workspace
+        os.environ["LANGCHAIN_WORKSPACE_ID"] = workspace
+    if _looks_like_langsmith_key(key):
+        os.environ["LANGSMITH_API_KEY"] = key
+        os.environ["LANGCHAIN_API_KEY"] = key
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return singleton settings instance and export the OpenAI key for clients."""
+    """Return singleton settings instance and export keys for OpenAI and LangSmith."""
 
     if not os.getenv("OPENAI_API_KEY"):
         secret = _streamlit_secret_key()
@@ -85,4 +125,5 @@ def get_settings() -> Settings:
     settings = Settings()
     if settings.openai_api_key:
         os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    _export_langsmith(settings)
     return settings
