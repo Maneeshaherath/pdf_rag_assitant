@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -80,27 +81,28 @@ def _vector_mmr_retrieve(
     return retriever.invoke(query)
 
 
-def _keyword_retrieve(
-    vector_store,
-    query: str,
-    settings: Settings,
-    doc_names: list[str] | None,
-) -> list[Document]:
+def _load_keyword_corpus(vector_store, doc_names: list[str] | None) -> tuple[list[str], list[dict]]:
     where = None
     if doc_names:
         where = {"file_name": {"$in": doc_names}}
 
     raw = vector_store.get(where=where, include=["documents", "metadatas"])
-    documents = raw.get("documents", [])
-    metadatas = raw.get("metadatas", [])
+    documents = raw.get("documents", []) or []
+    metadatas = raw.get("metadatas", []) or []
+    return documents, metadatas
 
+
+def _bm25_top(
+    documents: list[str],
+    metadatas: list[dict],
+    query: str,
+    settings: Settings,
+    bm25: BM25Okapi,
+) -> list[Document]:
     if not documents:
         return []
 
-    corpus = [_normalize_tokens(text) for text in documents]
-    bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(_normalize_tokens(query))
-
     ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
     top = ranked[: settings.bm25_k]
 
@@ -108,6 +110,20 @@ def _keyword_retrieve(
     for idx, _ in top:
         output.append(Document(page_content=documents[idx], metadata=metadatas[idx] or {}))
     return output
+
+
+def _keyword_retrieve(
+    vector_store,
+    query: str,
+    settings: Settings,
+    doc_names: list[str] | None,
+) -> list[Document]:
+    documents, metadatas = _load_keyword_corpus(vector_store, doc_names)
+    if not documents:
+        return []
+    corpus = [_normalize_tokens(text) for text in documents]
+    bm25 = BM25Okapi(corpus)
+    return _bm25_top(documents, metadatas, query, settings, bm25)
 
 
 def merge_and_deduplicate(doc_lists: list[list[Document]]) -> list[Document]:
@@ -127,26 +143,34 @@ def hybrid_retrieve(
     k: int | None = None,
     fetch_k: int | None = None,
 ) -> list[Document]:
-    """Run MMR + BM25 for each query and merge unique chunks."""
+    """Run MMR vector search and BM25 in parallel, then merge unique chunks."""
+
+    if not queries:
+        return []
+
+    documents, metadatas = _load_keyword_corpus(vector_store, doc_names)
+    bm25 = BM25Okapi([_normalize_tokens(text) for text in documents]) if documents else None
 
     all_results: list[list[Document]] = []
-    for q in queries:
-        vector_docs = _vector_mmr_retrieve(
-            vector_store=vector_store,
-            query=q,
-            settings=settings,
-            doc_names=doc_names,
-            k=k,
-            fetch_k=fetch_k,
-        )
-        keyword_docs = _keyword_retrieve(
-            vector_store=vector_store,
-            query=q,
-            settings=settings,
-            doc_names=doc_names,
-        )
-        all_results.append(vector_docs)
-        all_results.append(keyword_docs)
+    max_workers = min(8, max(2, len(queries)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        vector_futures = [
+            pool.submit(
+                _vector_mmr_retrieve,
+                vector_store,
+                q,
+                settings,
+                doc_names,
+                k,
+                fetch_k,
+            )
+            for q in queries
+        ]
+        if bm25 is not None:
+            for q in queries:
+                all_results.append(_bm25_top(documents, metadatas, q, settings, bm25))
+        for fut in vector_futures:
+            all_results.append(fut.result())
 
     return merge_and_deduplicate(all_results)
 
