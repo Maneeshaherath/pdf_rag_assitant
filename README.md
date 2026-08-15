@@ -5,6 +5,7 @@ A production-style Retrieval-Augmented Generation (RAG) system that lets users u
 It combines:
 - FastAPI backend for ingestion and query APIs
 - Streamlit frontend with a modern chat experience
+- LangGraph to orchestrate query-time RAG (retrieve, grade, retry, generate)
 - Chroma persistent vector database for document memory
 - Hybrid retrieval plus reranking for better answer quality
 
@@ -13,11 +14,13 @@ It combines:
 - Uploads and indexes PDF documents
 - Splits documents into semantic chunks with metadata
 - Stores embeddings in persistent Chroma DB
-- Expands user queries with LLM rewriting
+- Expands user queries with LLM rewriting (and likely typo fixes from document titles)
 - Retrieves relevant chunks using:
   - Vector retrieval with MMR
   - Keyword retrieval with BM25
+  - Vector and BM25 run in parallel
 - Re-ranks retrieved chunks with a cross-encoder model
+- LangGraph grades context, retries once if weak, or returns "I don't know"
 - Generates grounded answers from context only
 - Streams answer tokens in UI
 - Shows sources (file and page)
@@ -53,7 +56,8 @@ It combines:
                     │      FastAPI Backend (api.py)        │
                     │  ┌─────────────────────────────────┤ |
                     │  │ ▪ POST /upload (PDF ingestion)  │ |
-                    │  │ ▪ POST /query (stream answers)  │ |
+                    │  │ ▪ POST /query (LangGraph RAG)   │ |
+                    │  │ ▪ POST /query/stream            │ |
                     │  │ ▪ GET /documents (list docs)    │ |
                     │  │ ▪ GET /health (status check)    │ |
                     │  └─────────────────────────────────┤ |
@@ -63,9 +67,9 @@ It combines:
         │              │              │              │
         ▼              ▼              ▼              ▼
    ┌─────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────┐
-   │Ingestion│  │  Retriever   │  │Reranker  │  │   LLM    │
-   │(PDF→    │  │  (Hybrid     │  │(Cross-   │  │(Answer   │
-   │ Chunks) │  │   Search)    │  │encoder)  │  │Generate) │
+   │Ingestion│  │ LangGraph    │  │Reranker  │  │   LLM    │
+   │(PDF→    │  │ RAG graph    │  │(Cross-   │  │(Answer   │
+   │ Chunks) │  │ (query path) │  │encoder)  │  │Generate) │
    └────┬────┘  └──────┬───────┘  └────┬─────┘  └────┬─────┘
         │              │               │              │
         │     ┌────────┤               │              │
@@ -109,17 +113,19 @@ It combines:
 
 #### **2. FastAPI Backend (API Layer)**
 - **File**: `api.py`
-- **Purpose**: Handles all business logic and orchestrates the RAG pipeline
+- **Purpose**: HTTP shell. Upload stays a one-shot job. `/query` and `/query/stream` invoke the LangGraph RAG app.
 - **Key Endpoints**:
+  - `GET /`: Small pointer to `/docs` and `/health`
   - `POST /upload`: Accepts PDF files and triggers ingestion pipeline
-  - `POST /query`: Accepts user queries and returns generated answers
+  - `POST /query`: Runs the graph and returns a generated answer
+  - `POST /query/stream`: Runs the graph, then streams generate tokens
   - `GET /documents`: Lists all indexed documents in Chroma DB
-  - `GET /health`: System health check
-- **Responsibilities**: 
+  - `GET /health`: System health check (`openai_key_set`)
+- **Responsibilities**:
   - CORS configuration for frontend access
   - Request validation using Pydantic schemas
+  - Loads `OPENAI_API_KEY` from env, `.env`, or `.streamlit/secrets.toml`
   - Error handling and logging
-  - Pipeline orchestration
 
 #### **3. Document Ingestion Pipeline**
 - **File**: `ingestion.py`
@@ -133,42 +139,53 @@ It combines:
   5. **Deduplicate**: Skip re-ingestion of already processed documents using SHA256 hash
 - **Output**: Indexed document chunks with metadata (source, page, content)
 
-#### **4. Retrieval System (Hybrid Search)**
+#### **4. LangGraph Query Orchestration**
+- **Files**: `graph/state.py`, `graph/nodes.py`, `graph/rag_graph.py`
+- **Purpose**: Control flow for questions only (not upload)
+- **Graph**:
+  1. `expand_query` — LLM rewrites plus likely typo fixes from PDF titles
+  2. `hybrid_retrieve` — vector MMR and BM25 in parallel, then merge
+  3. `rerank` — cross-encoder top-n
+  4. `grade_context` — use rerank scores (no extra judge model)
+  5. Branch:
+     - Strong context → `generate`
+     - Weak + first try → `rewrite_query` → retrieve again (max 1 retry)
+     - Still weak → `refuse_no_context` (`I don't know.`, skip GPT)
+- **LangChain** still does PDF load, split, embeddings, Chroma, and the chat model. LangGraph only decides the next step.
+
+#### **5. Retrieval System (Hybrid Search)**
 - **File**: `retriever.py`
-- **Retrieval Strategy** (from `retriever.py`):
-  1. **Query Expansion**: LLM generates 3 query rewrites to improve coverage
-  2. **Hybrid Retrieval**:
-     - **Vector Search**: MMR (Maximum Marginal Relevance) with k=8, fetch_k=25
-       - Balances relevance with diversity
-       - Uses semantic similarity from embeddings
-     - **Keyword Search**: BM25 algorithm with k=8
-       - Catches exact term matches that embeddings might miss
-     - **Fusion**: Combines both result sets for comprehensive coverage
+- **Retrieval Strategy**:
+  1. **Query Expansion**: LLM generates rewrites; can correct typos using document titles
+  2. **Hybrid Retrieval** (vector and BM25 overlap):
+     - **Vector Search**: MMR with k=8, fetch_k=25 (run in a thread pool)
+     - **Keyword Search**: BM25 with k=8 on a shared corpus loaded once
+     - **Fusion**: Merge and dedupe by `chunk_id`
   3. **Document Filtering**: Optional filter by source documents
 - **Why Hybrid?**: Vector search excels at semantic matching, BM25 at exact terms. Combined = best of both worlds
 
-#### **5. Reranking Module**
+#### **6. Reranking Module**
 - **File**: `reranker.py`
 - **Purpose**: Re-rank retrieved chunks by relevance to create higher-quality context
-- **Model**: Cross-encoder (ms-marco-MiniLM-L-6-v2)
-  - Scores all retrieved chunks against the query
+- **Model**: Cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`)
+  - Scores `(question, chunk)` pairs
   - Selects top-4 chunks (configurable)
-- **Benefit**: Filters out low-relevance results before going to LLM, improving answer quality and reducing token usage
+- **Benefit**: Filters low-relevance results before the LLM; grade also uses these scores
 
-#### **6. LLM & Answer Generation**
+#### **7. LLM & Answer Generation**
 - **File**: `llm.py`
 - **Components**:
   - **Chat Model**: OpenAI's gpt-4o-mini (configurable)
-  - **System Prompt**: Strict prompt enforcing context-only answers
+  - **System Prompt**: Context-only answers; allows obvious typos if context matches (e.g. paring → parsing)
   - **Anti-Hallucination**: Returns "I don't know" if context is insufficient
-  - **Streaming**: Token-by-token generation for responsive UI
+  - **Streaming**: Token-by-token generation for `/query/stream`
 - **Process**:
   1. Format retrieved chunks as context
-  2. Inject user query into prompt
-  3. Generate answer respecting context boundaries
-  4. Stream tokens to UI for live feedback
+  2. Prefer a corrected expanded query when answering
+  3. Generate or stream the answer
+  4. Attach file + page sources
 
-#### **7. Vector Store (Chroma DB)**
+#### **8. Vector Store (Chroma DB)**
 - **Location**: `./chroma_db/` (persistent on disk)
 - **Purpose**: Centralized storage for:
   - Document embeddings (vector representations)
@@ -179,7 +196,7 @@ It combines:
   - Fast similarity search using vector indices
   - Collection-based organization
 
-#### **8. Configuration Manager**
+#### **9. Configuration Manager**
 - **File**: `config.py`
 - **Purpose**: Centralized settings management via environment variables
 - **Key Settings**:
@@ -215,29 +232,19 @@ Chroma Vector DB (indexed & persistent)
 User Query
        │
        ▼
-┌──────────────────────────┐
-│  Retrieval Pipeline      │
-│  • Expand query (3 ways) │
-│  • Hybrid search         │
-│    - Vector (MMR)        │
-│    - Keyword (BM25)      │
-│  • Combine results       │
-└──────┬───────────────────┘
-       │
-       ▼
-┌──────────────┐
-│   Reranker   │ → Cross-encoder scores
-│              │ → Selects top-4 chunks
-└──────┬───────┘
-       │
-       ▼
-┌──────────────────────────┐
-│   LLM Generation         │
-│   • Format context       │
-│   • Insert query         │
-│   • Generate answer      │
-│   • Stream tokens        │
-└──────┬───────────────────┘
+┌──────────────────────────────────┐
+│  LangGraph RAG (api.py invoke)   │
+│  • Expand query (+ typo fixes)   │
+│  • Hybrid search in parallel     │
+│    - Vector MMR (thread pool)    │
+│    - Keyword BM25 (shared index) │
+│  • Merge / dedupe                │
+│  • Cross-encoder rerank          │
+│  • Grade scores                  │
+│      ├─ strong → generate        │
+│      ├─ weak, retry 0 → rewrite  │
+│      └─ still weak → I don't know│
+└──────┬───────────────────────────┘
        │
        ▼
 Streamlit UI (displays answer + sources)
@@ -248,41 +255,44 @@ Streamlit UI (displays answer + sources)
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
 | **Frontend** | Streamlit | Interactive chat UI |
-| **Backend** | FastAPI | REST API & orchestration |
+| **Backend** | FastAPI | REST API & upload |
+| **Query orchestration** | LangGraph | Expand → retrieve → rerank → grade → generate / retry / refuse |
 | **Vector DB** | Chroma | Document embeddings & storage |
 | **Embeddings** | OpenAI (text-embedding-3-small) | Semantic representation |
-| **LLM** | OpenAI (gpt-4o-mini) | Answer generation |
-| **Reranking** | HuggingFace Cross-encoder | Relevance scoring |
-| **Keyword Search** | BM25 (rank-bm25) | Exact term matching |
+| **LLM** | OpenAI (gpt-4o-mini) | Expansion, rewrite, answers |
+| **Reranking** | HuggingFace Cross-encoder (MiniLM-L-6-v2) | Relevance scoring |
+| **Keyword Search** | BM25 (rank-bm25) | Exact term matching (parallel with vector) |
 | **PDF Processing** | PyPDF | Document extraction |
 | **Validation** | Pydantic | Schema validation |
 
 ### Key Design Principles
 
-1. **Modularity**: Each component (ingestion, retrieval, reranking, generation) is independently testable and replaceable
-2. **Hybrid Retrieval**: Combines semantic and keyword search for comprehensive results
-3. **Anti-Hallucination**: Strict prompting ensures LLM only uses provided context
+1. **Modularity**: Ingestion, retrieval, reranking, and generation stay separate; LangGraph only wires the query path
+2. **Hybrid Retrieval**: Semantic + keyword search, run in parallel
+3. **Anti-Hallucination**: Context-only answers; weak retrieval can skip the LLM
 4. **Persistence**: Chroma DB stores embeddings permanently, avoiding re-processing
 5. **Streaming**: Token streaming provides real-time user feedback
 6. **Configurability**: All parameters are environment-driven for easy deployment flexibility
 
 ## Project Structure
 
-- app.py: Streamlit launcher
+- app.py: Streamlit launcher (file watcher disabled)
 - ui.py: Streamlit chat UI
-- api.py: FastAPI server and endpoints
+- api.py: FastAPI server; `/query` invokes LangGraph
+- graph/: RAG state, nodes, and compiled graph
 - config.py: central settings
 - schemas.py: request and response schemas
 - ingestion.py: PDF load, chunk, metadata, dedup
-- retriever.py: query expansion plus hybrid retrieval
+- retriever.py: query expansion plus parallel hybrid retrieval
 - reranker.py: cross-encoder reranking
 - llm.py: strict prompting and streaming generation
 
 ## Features
 
+- LangGraph query flow with one rewrite retry and refuse-on-weak-context
 - MMR retriever with configurable k and fetch_k
-- LLM query expansion (multiple rewrites)
-- Hybrid retrieval (vector plus BM25)
+- LLM query expansion (multiple rewrites, typo-aware)
+- Hybrid retrieval (vector plus BM25 in parallel)
 - Cross-encoder reranking for top chunks
 - Strict anti-hallucination prompt with fallback: I don't know
 - Token streaming in UI
@@ -380,6 +390,7 @@ streamlit run app.py
 
 ## API Endpoints
 
+- GET /
 - GET /health
 - GET /documents
 - POST /upload
@@ -392,7 +403,8 @@ All main settings are centralized in `config.py`, including:
 
 - model names
 - chunk size and overlap
-- retrieval and reranking limits
+- retrieval and reranking limits (`RERANK_TOP_N`, `RERANK_MIN_SCORE`)
+- LangGraph retry cap (`RAG_MAX_RETRIES`, default 1)
 - max query length and max upload size
 - API host and port
 - Chroma path
