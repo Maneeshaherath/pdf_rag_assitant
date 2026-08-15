@@ -2,6 +2,8 @@
 
 A production-style Retrieval-Augmented Generation (RAG) system that lets users upload one or more PDF files and chat with them using an OpenAI model.
 
+**Full technical write-up** (architecture, LangGraph, data pipeline, why these tools): [docs/TECHNICAL.md](docs/TECHNICAL.md)
+
 It combines:
 - FastAPI backend for ingestion and query APIs
 - Streamlit frontend with a modern chat experience
@@ -283,6 +285,7 @@ Streamlit UI (displays answer + sources)
 - ui.py: Streamlit chat UI
 - api.py: FastAPI server; `/query` invokes LangGraph
 - graph/: RAG state, nodes, and compiled graph
+- docs/TECHNICAL.md: architecture, diagrams, techniques, and tech choices
 - docs/langsmith/: LangSmith dashboard screenshots
 - config.py: central settings (including LangSmith env export)
 - schemas.py: request and response schemas
